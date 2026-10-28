@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Минус</title>
+<style>
+:root{--bg:#E8EBF1;--ink:#1B2340;--muted:#5A6482;--accent:#2F5BFF;--line:#C3C9D8;--card:#F7F8FB}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+padding:max(24px,env(safe-area-inset-top)) 20px max(24px,env(safe-area-inset-bottom));max-width:560px;margin-inline:auto}
+h1{font-size:2.6rem;margin:0 0 4px;letter-spacing:-.03em;font-weight:800}
+p.lead{margin:0 0 24px;color:var(--muted);line-height:1.45}
+label.pick{display:block;border:2px dashed var(--line);background:var(--card);border-radius:14px;padding:28px 16px;text-align:center;font-weight:600}
+label.pick small{display:block;color:var(--muted);font-weight:400;margin-top:6px}
+input[type=file]{display:none}
+.row{display:flex;align-items:center;gap:10px;margin:18px 0}
+.row input{width:20px;height:20px;accent-color:var(--accent)}
+button{width:100%;padding:16px;border:0;border-radius:12px;background:var(--accent);color:#fff;font-size:1.05rem;font-weight:700}
+button:disabled{background:var(--line);color:var(--muted)}
+button.ghost{background:transparent;color:var(--accent);border:2px solid var(--accent);margin-top:10px}
+#status{margin:16px 0;color:var(--muted);min-height:1.4em}
+audio{width:100%;margin-top:8px}
+#out{display:none}
+.note{margin-top:28px;font-size:.85rem;color:var(--muted);line-height:1.5}
+</style>
+</head>
+<body>
+<h1>Минус</h1>
+<p class="lead">Загрузи песню — получишь версию без голоса.</p>
+
+<label class="pick" id="pick">
+  <span id="fname">Выбрать песню</span>
+  <small>MP3, M4A, WAV, OGG</small>
+  <input type="file" id="file" accept="audio/*">
+</label>
+
+<div class="row"><input type="checkbox" id="bass" checked><label for="bass">Сохранить бас и бочку</label></div>
+
+<button id="go" disabled>Сделать минус</button>
+<div id="status"></div>
+
+<div id="out">
+  <audio id="player" controls></audio>
+  <button class="ghost" id="save">Сохранить / поделиться</button>
+</div>
+
+<p class="note">Метод: вычитание центрального канала. Вокал обычно стоит в центре, поэтому он уходит, но тихие следы могут остаться. Лучше всего работает на стереозаписях.</p>
+
+<script>
+const $ = id => document.getElementById(id);
+let file = null, wavBlob = null, outName = 'minus.wav';
+
+$('file').addEventListener('change', e => {
+  file = e.target.files[0];
+  if (!file) return;
+  $('fname').textContent = file.name;
+  $('go').disabled = false;
+  $('out').style.display = 'none';
+  $('status').textContent = '';
+});
+
+$('go').addEventListener('click', async () => {
+  $('go').disabled = true;
+  $('out').style.display = 'none';
+  try {
+    $('status').textContent = 'Читаю файл…';
+    const buf = await file.arrayBuffer();
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    $('status').textContent = 'Декодирую…';
+    const audio = await ctx.decodeAudioData(buf);
+    ctx.close();
+    await new Promise(r => setTimeout(r, 30));
+    $('status').textContent = 'Убираю голос…';
+    await new Promise(r => setTimeout(r, 30));
+    const pcm = removeVocals(audio, $('bass').checked);
+    wavBlob = encodeWav(pcm, audio.sampleRate);
+    outName = file.name.replace(/\.[^.]+$/, '').replace(/[^\w\-]+/g, '_') + '_minus.wav';
+    $('player').src = URL.createObjectURL(wavBlob);
+    $('out').style.display = 'block';
+    $('status').textContent = audio.numberOfChannels < 2
+      ? 'Готово, но песня моно — голос убрать не получится.'
+      : 'Готово.';
+  } catch (err) {
+    $('status').textContent = 'Не удалось обработать файл: ' + err.message;
+  }
+  $('go').disabled = false;
+});
+
+function removeVocals(audio, keepBass) {
+  const L = audio.getChannelData(0);
+  const R = audio.numberOfChannels > 1 ? audio.getChannelData(1) : L;
+  const n = L.length, out = new Float32Array(n);
+  const alpha = 1 - Math.exp(-2 * Math.PI * 150 / audio.sampleRate);
+  let lp = 0, peak = 0;
+  for (let i = 0; i < n; i++) {
+    let v = (L[i] - R[i]) * 0.5;
+    if (keepBass) {
+      lp += alpha * ((L[i] + R[i]) * 0.5 - lp);
+      v += lp;
+    }
+    out[i] = v;
+    const a = Math.abs(v);
+    if (a > peak) peak = a;
+  }
+  const gain = peak > 0 ? 0.95 / peak : 1;
+  for (let i = 0; i < n; i++) out[i] *= gain;
+  return out;
+}
+
+function encodeWav(samples, rate) {
+  const n = samples.length;
+  const dv = new DataView(new ArrayBuffer(44 + n * 2));
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); dv.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, rate, true); dv.setUint32(28, rate * 2, true);
+  dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+  str(36, 'data'); dv.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    dv.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Blob([dv], { type: 'audio/wav' });
+}
+
+function blobToBase64(blob) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result).split(',')[1]);
+    r.onerror = () => rej(new Error('Не удалось прочитать результат'));
+    r.readAsDataURL(blob);
+  });
+}
+
+$('save').addEventListener('click', async () => {
+  try {
+    const cap = window.Capacitor;
+    if (cap && cap.isNativePlatform && cap.isNativePlatform()) {
+      const { Filesystem, Share } = cap.Plugins;
+      const data = await blobToBase64(wavBlob);
+      const saved = await Filesystem.writeFile({ path: outName, data, directory: 'CACHE' });
+      await Share.share({ title: outName, url: saved.uri });
+    } else {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(wavBlob);
+      a.download = outName;
+      a.click();
+    }
+  } catch (err) {
+    $('status').textContent = 'Не удалось сохранить: ' + err.message;
+  }
+});
+</script>
+</body>
+</html>
